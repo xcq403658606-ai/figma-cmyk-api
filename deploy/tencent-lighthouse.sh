@@ -28,8 +28,26 @@ if [[ ! -d "${APP_DIRECTORY}/.git" ]]; then
   git clone --filter=blob:none "${REPOSITORY_URL}" "${APP_DIRECTORY}"
 fi
 
-git -C "${APP_DIRECTORY}" fetch --prune origin \
-  "+refs/heads/${APP_REVISION}:refs/remotes/origin/${APP_REVISION}"
+fetch_revision() {
+  local attempt
+  for attempt in 1 2 3; do
+    if git -C "${APP_DIRECTORY}" \
+      -c http.version=HTTP/1.1 \
+      -c http.lowSpeedLimit=1024 \
+      -c http.lowSpeedTime=30 \
+      fetch --prune origin \
+      "+refs/heads/${APP_REVISION}:refs/remotes/origin/${APP_REVISION}"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      sleep "$((attempt * 2))"
+    fi
+  done
+  echo "Failed to fetch ${APP_REVISION} after 3 attempts." >&2
+  return 1
+}
+
+fetch_revision
 git -C "${APP_DIRECTORY}" switch --detach --force "origin/${APP_REVISION}"
 
 GIT_SHA="$(git -C "${APP_DIRECTORY}" rev-parse --short=12 HEAD)"

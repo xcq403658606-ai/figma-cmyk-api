@@ -161,6 +161,7 @@ export function createApp(overrides = {}) {
   }));
 
   app.get("/health", (_req, res) => {
+    res.set("Cache-Control", "no-store");
     res.json({
       ok: true,
       service: "edc-box-image-api",

@@ -40,6 +40,7 @@ async function pngFixture(width = 160, height = 100) {
 
 test("health endpoint exposes codec, capacity, auth, and exact CMYK profile metadata", async () => {
   const response = await request(testApp()).get("/health").expect(200);
+  assert.equal(response.headers["cache-control"], "no-store");
   assert.equal(response.body.ok, true);
   assert.equal(response.body.service, "edc-box-image-api");
   assert.equal(response.body.region, "ap-shanghai");

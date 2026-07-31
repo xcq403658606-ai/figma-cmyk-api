@@ -86,7 +86,7 @@ export function createApp() {
   });
 
   // Zero-downtime compatibility for the existing Render client during cutover.
-  // The previous apiKey field is intentionally ignored; all processing is local.
+  // Every request is processed locally with Sharp/libvips.
   app.post(
     "/process-image",
     requireBearer,

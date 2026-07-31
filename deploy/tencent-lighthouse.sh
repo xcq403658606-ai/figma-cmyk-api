@@ -2,9 +2,8 @@
 set -Eeuo pipefail
 
 # Reproducible Tencent Cloud Lighthouse deployment.
-# Override APP_REVISION after the migration branch has been merged.
 REPOSITORY_URL="${REPOSITORY_URL:-https://github.com/xcq403658606-ai/figma-cmyk-api.git}"
-APP_REVISION="${APP_REVISION:-agent/tencent-cmyk-migration}"
+APP_REVISION="${APP_REVISION:-main}"
 APP_DIRECTORY="${APP_DIRECTORY:-/opt/edc-box-api}"
 IMAGE_NAME="${IMAGE_NAME:-edc-box-api}"
 CONTAINER_NAME="${CONTAINER_NAME:-edc-box-api-next}"

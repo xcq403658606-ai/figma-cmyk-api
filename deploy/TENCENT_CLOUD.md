@@ -5,11 +5,11 @@
 ## 部署
 
 ```bash
-sudo APP_REVISION=agent/tencent-cmyk-migration \
+sudo APP_REVISION=main \
   bash deploy/tencent-lighthouse.sh
 ```
 
-合并迁移分支后将 `APP_REVISION` 改为 `main`。脚本会拉取精确 Git 提交、构建带提交号的镜像、以只读和最小 Linux 权限启动容器，并在完成前验证 `/health`。
+脚本默认部署 `main`，也支持通过 `APP_REVISION` 指定待验收分支。它会拉取精确 Git 提交、构建带提交号的镜像、以只读和最小 Linux 权限启动容器，并在完成前验证 `/health`。
 
 ## Nginx
 

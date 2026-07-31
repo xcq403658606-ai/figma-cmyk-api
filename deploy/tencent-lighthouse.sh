@@ -28,7 +28,8 @@ if [[ ! -d "${APP_DIRECTORY}/.git" ]]; then
   git clone --filter=blob:none "${REPOSITORY_URL}" "${APP_DIRECTORY}"
 fi
 
-git -C "${APP_DIRECTORY}" fetch --prune origin
+git -C "${APP_DIRECTORY}" fetch --prune origin \
+  "+refs/heads/${APP_REVISION}:refs/remotes/origin/${APP_REVISION}"
 git -C "${APP_DIRECTORY}" switch --detach --force "origin/${APP_REVISION}"
 
 GIT_SHA="$(git -C "${APP_DIRECTORY}" rev-parse --short=12 HEAD)"

@@ -69,11 +69,31 @@ function createAdmissionMiddleware(settings) {
       released = true;
       activeRequests = Math.max(0, activeRequests - 1);
     };
-    res.once("finish", release);
-    res.once("close", release);
+    const admission = {
+      processing: false,
+      release
+    };
+    res.locals.admission = admission;
+    const releaseIfIdle = () => {
+      if (!admission.processing) release();
+    };
+    res.once("finish", releaseIfIdle);
+    res.once("close", releaseIfIdle);
     res.setTimeout(settings.processingTimeoutMs);
     return next();
   };
+}
+
+async function runAdmittedProcessing(res, operation) {
+  const admission = res.locals.admission;
+  if (!admission) return operation();
+  admission.processing = true;
+  try {
+    return await operation();
+  } finally {
+    admission.processing = false;
+    admission.release();
+  }
 }
 
 function createUpload(settings) {
@@ -209,7 +229,10 @@ export function createApp(overrides = {}) {
           compressMode: "quality",
           quality
         });
-        const processed = await imageProcessor(req.file.buffer, exportConfig);
+        const processed = await runAdmittedProcessing(
+          res,
+          () => imageProcessor(req.file.buffer, exportConfig)
+        );
         res.setHeader("Content-Type", exportConfig.format === "PNG" ? "image/png" : "image/jpeg");
         res.setHeader("X-EDC-Legacy", "true");
         res.setHeader(
@@ -257,15 +280,18 @@ export function createApp(overrides = {}) {
             : settings.processConcurrency
         );
 
-        const results = await Promise.all(
-          req.files.map((file, index) => limit(async () => {
-            const processed = await imageProcessor(file.buffer, exportConfig);
-            return {
-              name: names[index],
-              data: processed.data,
-              info: processed.info
-            };
-          }))
+        const results = await runAdmittedProcessing(
+          res,
+          () => Promise.all(
+            req.files.map((file, index) => limit(async () => {
+              const processed = await imageProcessor(file.buffer, exportConfig);
+              return {
+                name: names[index],
+                data: processed.data,
+                info: processed.info
+              };
+            }))
+          )
         );
 
         const stats = {

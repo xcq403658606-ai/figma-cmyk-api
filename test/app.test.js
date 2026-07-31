@@ -253,3 +253,81 @@ test("global admission rejects overload before starting another image processor"
   const completed = await first;
   assert.equal(completed.status, 200);
 });
+
+test("client disconnect keeps admission occupied until image processing finishes", { timeout: 10_000 }, async () => {
+  const input = await pngFixture();
+  let releaseProcessor;
+  let signalStarted;
+  let signalFinished;
+  const started = new Promise((resolve) => {
+    signalStarted = resolve;
+  });
+  const finished = new Promise((resolve) => {
+    signalFinished = resolve;
+  });
+  const processorGate = new Promise((resolve) => {
+    releaseProcessor = resolve;
+  });
+  const imageProcessor = async (buffer, exportConfig) => {
+    signalStarted();
+    await processorGate;
+    try {
+      return await processImage(buffer, exportConfig);
+    } finally {
+      signalFinished();
+    }
+  };
+  const app = testApp({
+    maxConcurrentRequests: 1,
+    admissionRetryAfterSeconds: 2,
+    imageProcessor
+  });
+  const server = await new Promise((resolve) => {
+    const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
+  });
+  const address = server.address();
+  const endpoint = `http://127.0.0.1:${address.port}/process-image`;
+
+  try {
+    const firstForm = new FormData();
+    firstForm.append("format", "JPG");
+    firstForm.append("image", new Blob([input], { type: "image/png" }), "disconnect.png");
+    const controller = new AbortController();
+    const firstOutcome = fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      body: firstForm,
+      signal: controller.signal
+    }).catch((error) => error);
+
+    await started;
+    controller.abort();
+    await firstOutcome;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const whileDisconnectedWorkRuns = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` }
+    });
+    assert.equal(whileDisconnectedWorkRuns.status, 503);
+    assert.equal(whileDisconnectedWorkRuns.headers.get("retry-after"), "2");
+    assert.equal((await whileDisconnectedWorkRuns.json()).code, "SERVICE_OVERLOADED");
+
+    releaseProcessor();
+    await finished;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const afterProcessing = await fetch(endpoint, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TEST_TOKEN}` }
+    });
+    assert.equal(afterProcessing.status, 400);
+    assert.equal((await afterProcessing.json()).code, "NO_IMAGES");
+  } finally {
+    releaseProcessor?.();
+    await new Promise((resolve) => {
+      server.close(resolve);
+      server.closeAllConnections();
+    });
+  }
+});

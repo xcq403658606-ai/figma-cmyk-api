@@ -7,6 +7,8 @@ FROM node:22-bookworm-slim
 ENV NODE_ENV=production \
     PORT=8787 \
     CMYK_ICC_PROFILE=/app/icc/CoatedFOGRA39.icc \
+    CMYK_ICC_NAME=CoatedFOGRA39 \
+    CMYK_ICC_SHA256=da2b9b593e27cba2563cbc8596071c5c8f2395d3dbb4434538bac2bc9d58ce77 \
     UV_THREADPOOL_SIZE=4 \
     MALLOC_ARENA_MAX=2
 WORKDIR /app

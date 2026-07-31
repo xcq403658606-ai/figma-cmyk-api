@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import sharp from "sharp";
+import { config } from "../src/config.js";
+import { cmykProfile, loadAndVerifyIccProfile } from "../src/icc-profile.js";
 import { processImage } from "../src/image-pipeline.js";
 
 async function fixture() {
@@ -51,6 +53,20 @@ test("creates verified four-channel CMYK JPEG", async () => {
   assert.equal(metadata.space, "cmyk");
   assert.equal(metadata.channels, 4);
   assert.equal(metadata.hasProfile, true);
+  assert.equal(result.info.profileVerified, true);
+  assert.equal(result.info.profileName, cmykProfile.name);
+  assert.equal(result.info.profileSha256, cmykProfile.sha256);
+});
+
+test("rejects a configured CMYK ICC profile whose SHA-256 does not match", () => {
+  assert.throws(
+    () => loadAndVerifyIccProfile({
+      profilePath: config.cmykIccProfile,
+      expectedSha256: "0".repeat(64),
+      profileName: "mismatched"
+    }),
+    /SHA-256 mismatch/
+  );
 });
 
 test("target size mode stays at or below target", async () => {

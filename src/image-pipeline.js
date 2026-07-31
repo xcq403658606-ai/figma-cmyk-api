@@ -1,9 +1,10 @@
 import sharp from "sharp";
 import { config as serviceConfig } from "./config.js";
 import { AppError } from "./errors.js";
+import { cmykProfile, sha256 } from "./icc-profile.js";
 
 sharp.concurrency(serviceConfig.sharpConcurrency);
-sharp.cache({ memory: 96, files: 0, items: 256 });
+sharp.cache({ memory: 64, files: 0, items: 128 });
 
 const FORMAT_EXTENSION = {
   PNG: "png",
@@ -71,7 +72,7 @@ function buildPipeline(input, exportConfig, quality, dimensions) {
     pipeline = pipeline
       .flatten({ background: "#ffffff" })
       .pipelineColourspace("srgb")
-      .withIccProfile(serviceConfig.cmykIccProfile, { attach: true })
+      .withIccProfile(cmykProfile.path, { attach: true })
       .toColourspace("cmyk");
   } else {
     pipeline = pipeline.pipelineColourspace("srgb").withIccProfile("srgb", { attach: true });
@@ -153,7 +154,7 @@ async function encodeToTarget(input, exportConfig, metadata) {
   );
 }
 
-async function verifyOutput(buffer, exportConfig) {
+async function verifyOutputStrict(buffer, exportConfig) {
   const metadata = await sharp(buffer, {
     failOn: "warning",
     limitInputPixels: serviceConfig.maxInputPixels
@@ -166,27 +167,59 @@ async function verifyOutput(buffer, exportConfig) {
         ? "jpg"
         : metadata.format;
   if (actualFormat !== expectedFormat) {
-    throw new AppError("OUTPUT_VERIFICATION_FAILED", "输出格式验证失败。", 500);
+    throw new AppError("OUTPUT_VERIFICATION_FAILED", "Output format verification failed.", 500);
   }
   if (exportConfig.colorSpace === "CMYK") {
-    if (metadata.space !== "cmyk" || metadata.channels !== 4 || !metadata.hasProfile) {
+    const embeddedProfileSha256 = metadata.icc ? sha256(metadata.icc) : null;
+    if (
+      metadata.space !== "cmyk" ||
+      metadata.channels !== 4 ||
+      !metadata.hasProfile ||
+      embeddedProfileSha256 !== cmykProfile.sha256
+    ) {
       throw new AppError(
         "CMYK_VERIFICATION_FAILED",
-        "CMYK 输出未通过四通道与 ICC 校验，本文件已阻止下载。",
+        "CMYK output did not pass the four-channel and exact ICC profile verification.",
         500
       );
     }
+    metadata.profileSha256 = embeddedProfileSha256;
   }
   return metadata;
 }
 
+async function inspectInput(input) {
+  try {
+    return await sharp(input, {
+      failOn: "warning",
+      limitInputPixels: serviceConfig.maxInputPixels,
+      pages: 1
+    }).metadata();
+  } catch {
+    throw new AppError(
+      "INVALID_IMAGE",
+      "The uploaded file could not be decoded as a valid PNG or JPEG image.",
+      422
+    );
+  }
+}
+
+async function encodeSafely(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(
+      "INVALID_IMAGE",
+      "The uploaded image is corrupt or cannot be decoded safely.",
+      422
+    );
+  }
+}
+
 export async function processImage(input, exportConfig) {
   const startedAt = performance.now();
-  const inputMetadata = await sharp(input, {
-    failOn: "warning",
-    limitInputPixels: serviceConfig.maxInputPixels,
-    pages: 1
-  }).metadata();
+  const inputMetadata = await inspectInput(input);
 
   let result;
   let attempts = 1;
@@ -195,16 +228,18 @@ export async function processImage(input, exportConfig) {
   let dimensions = null;
 
   if (exportConfig.compressMode === "target") {
-    result = await encodeToTarget(input, exportConfig, inputMetadata);
+    result = await encodeSafely(() => encodeToTarget(input, exportConfig, inputMetadata));
     attempts = result.attempts;
     quality = result.quality;
     targetBytes = result.targetBytes;
     dimensions = result.dimensions || null;
   } else {
-    result = await encode(input, exportConfig, exportConfig.quality, null);
+    result = await encodeSafely(
+      () => encode(input, exportConfig, exportConfig.quality, null)
+    );
   }
 
-  const outputMetadata = await verifyOutput(result.data, exportConfig);
+  const outputMetadata = await verifyOutputStrict(result.data, exportConfig);
   return {
     data: result.data,
     info: {
@@ -217,6 +252,13 @@ export async function processImage(input, exportConfig) {
       format: exportConfig.format,
       colorSpace: exportConfig.colorSpace,
       profileAttached: Boolean(outputMetadata.hasProfile),
+      profileVerified:
+        exportConfig.colorSpace === "CMYK"
+          ? outputMetadata.profileSha256 === cmykProfile.sha256
+          : Boolean(outputMetadata.hasProfile),
+      profileName: exportConfig.colorSpace === "CMYK" ? cmykProfile.name : "sRGB",
+      profileSha256:
+        exportConfig.colorSpace === "CMYK" ? outputMetadata.profileSha256 : null,
       channels: outputMetadata.channels,
       width: outputMetadata.width,
       height: outputMetadata.height,

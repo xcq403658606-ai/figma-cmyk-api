@@ -29,3 +29,22 @@ curl --fail https://你的域名/health
 ```
 
 随后分别验证旧版兼容接口 `/process-image` 与批量接口 `/v1/images/batch`，确认 CMYK 输出为 JPEG、四通道、`space=cmyk` 且附带 ICC profile。
+
+## Authenticated candidate deployment
+
+Supply the bearer token from a root-readable secret source without writing it to the repository:
+
+```bash
+sudo --preserve-env=API_BEARER_TOKEN \
+  APP_REVISION=main \
+  bash deploy/tencent-lighthouse.sh
+```
+
+The script starts the new image on `127.0.0.1:18787`, verifies candidate health, then replaces the active container. If the active health check fails, it automatically recreates and verifies the previous image. Docker local log rotation is capped at three 10 MiB files.
+
+After deployment, run the authenticated smoke test. It extracts the returned ZIP and validates every CMYK JPEG against the pinned ICC SHA-256:
+
+```bash
+EDC_API_BEARER_TOKEN='read-from-your-secret-manager' \
+  node scripts/smoke-remote.mjs https://api.your-domain.example
+```

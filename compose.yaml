@@ -7,6 +7,10 @@ services:
     environment:
       UV_THREADPOOL_SIZE: ${UV_THREADPOOL_SIZE:-4}
       MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:?API_BEARER_TOKEN is required}
+      MAX_CONCURRENT_REQUESTS: ${MAX_CONCURRENT_REQUESTS:-2}
+      PROCESS_CONCURRENCY: ${PROCESS_CONCURRENCY:-1}
+      SHARP_CONCURRENCY: ${SHARP_CONCURRENCY:-2}
     expose:
       - "8787"
     read_only: true
@@ -19,7 +23,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 6g
+          memory: 3g
 
   caddy:
     image: caddy:2.10-alpine

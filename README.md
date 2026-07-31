@@ -57,3 +57,18 @@ npm run benchmark
 ```
 
 启动后，插件的 localhost 预览会自动连接 `http://127.0.0.1:8787`。
+
+## Team release security gate
+
+- Production refuses to start without `API_BEARER_TOKEN`. Generate a long random secret, inject it through the deployment environment, and never commit it.
+- Every `/process-image` and `/v1/images/batch` request must send `Authorization: Bearer <token>`.
+- The 4 GB host defaults admit two costly requests, process one file per batch at a time, and cap a request at 8 files / 64 MiB total.
+- `/health` publishes the expected CMYK profile name and SHA-256. Startup fails if the configured ICC file does not match that digest, and every CMYK output is checked against the same exact digest.
+- For a privately distributed team plugin, rotate the bearer token when membership changes. A publicly distributed plugin must use per-user short-lived credentials instead of embedding this team secret.
+
+Remote release verification:
+
+```bash
+EDC_API_BEARER_TOKEN='read-from-your-secret-manager' \
+  node scripts/smoke-remote.mjs https://api.your-domain.example
+```

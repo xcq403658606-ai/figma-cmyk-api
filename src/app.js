@@ -10,6 +10,7 @@ import sharp from "sharp";
 import { config } from "./config.js";
 import { AppError, toPublicError } from "./errors.js";
 import { assertSupportedInput, uniqueOutputNames } from "./file-utils.js";
+import { cmykProfile } from "./icc-profile.js";
 import { processImage } from "./image-pipeline.js";
 import { parseExportConfig } from "./validation.js";
 
@@ -19,31 +20,116 @@ function requestId(req) {
   return crypto.randomUUID();
 }
 
-function originAllowed(origin) {
+function originAllowed(origin, allowedOrigins = config.allowedOrigins) {
   if (!origin) return true;
-  return config.allowedOrigins.includes(origin);
+  return allowedOrigins.includes(origin);
 }
 
-function requireBearer(req, _res, next) {
-  if (!config.apiBearerToken) return next();
-  if (req.get("Authorization") === `Bearer ${config.apiBearerToken}`) return next();
-  return next(new AppError("UNAUTHORIZED", "无效的服务授权。", 401));
+function bearerTokenMatches(authorization, expectedToken) {
+  const match =
+    typeof authorization === "string"
+      ? /^Bearer ([^\s]+)$/i.exec(authorization)
+      : null;
+  if (!match || !expectedToken) return false;
+  const suppliedDigest = crypto.createHash("sha256").update(match[1]).digest();
+  const expectedDigest = crypto.createHash("sha256").update(expectedToken).digest();
+  return crypto.timingSafeEqual(suppliedDigest, expectedDigest);
 }
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    files: config.maxFiles,
-    fileSize: config.maxFileBytes,
-    fields: 4
-  },
-  fileFilter: (_req, file, callback) => {
-    if (["image/png", "image/jpeg"].includes(file.mimetype)) callback(null, true);
-    else callback(new AppError("UNSUPPORTED_INPUT", "仅支持 PNG/JPEG 源文件。", 415));
+function createBearerGuard(expectedToken) {
+  return (req, _res, next) => {
+    if (!expectedToken) {
+      return next(new AppError(
+        "AUTH_NOT_CONFIGURED",
+        "Service authorization is not configured.",
+        503
+      ));
+    }
+    if (bearerTokenMatches(req.get("Authorization"), expectedToken)) return next();
+    return next(new AppError("UNAUTHORIZED", "Invalid service authorization.", 401));
+  };
+}
+
+function createAdmissionMiddleware(settings) {
+  let activeRequests = 0;
+  return (_req, res, next) => {
+    if (activeRequests >= settings.maxConcurrentRequests) {
+      res.setHeader("Retry-After", String(settings.admissionRetryAfterSeconds));
+      return next(new AppError(
+        "SERVICE_OVERLOADED",
+        "The image service is at capacity. Retry shortly.",
+        503
+      ));
+    }
+
+    activeRequests += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      activeRequests = Math.max(0, activeRequests - 1);
+    };
+    res.once("finish", release);
+    res.once("close", release);
+    res.setTimeout(settings.processingTimeoutMs);
+    return next();
+  };
+}
+
+function createUpload(settings) {
+  return multer({
+    storage: multer.memoryStorage(),
+    limits: {
+      files: settings.maxFiles,
+      fileSize: settings.maxFileBytes,
+      fields: 4,
+      parts: settings.maxFiles + 4
+    },
+    fileFilter: (_req, file, callback) => {
+      if (["image/png", "image/jpeg"].includes(file.mimetype)) callback(null, true);
+      else callback(new AppError("UNSUPPORTED_INPUT", "Only PNG/JPEG inputs are supported.", 415));
+    }
+  });
+}
+
+function normalizeRequestError(error) {
+  if (!(error instanceof multer.MulterError)) {
+    const message = String(error?.message || "");
+    if (
+      /unexpected end of form|malformed part header|boundary not found/i.test(message)
+    ) {
+      return new AppError(
+        "INVALID_MULTIPART",
+        "The multipart upload is incomplete or malformed.",
+        400
+      );
+    }
+    return error;
   }
-});
+  const mappings = {
+    LIMIT_FILE_SIZE: ["FILE_TOO_LARGE", "An image exceeds the per-file size limit.", 413],
+    LIMIT_FILE_COUNT: ["TOO_MANY_FILES", "The request contains too many images.", 413],
+    LIMIT_PART_COUNT: ["TOO_MANY_PARTS", "The multipart request contains too many parts.", 400],
+    LIMIT_FIELD_COUNT: ["TOO_MANY_FIELDS", "The multipart request contains too many fields.", 400],
+    LIMIT_FIELD_KEY: ["INVALID_MULTIPART", "A multipart field name is too long.", 400],
+    LIMIT_FIELD_VALUE: ["INVALID_MULTIPART", "A multipart field value is too large.", 400],
+    LIMIT_UNEXPECTED_FILE: ["UNEXPECTED_FILE", "The multipart image field is invalid.", 400]
+  };
+  const [code, message, status] =
+    mappings[error.code] ||
+    ["INVALID_MULTIPART", "The multipart upload is invalid.", 400];
+  return new AppError(code, message, status);
+}
 
-export function createApp() {
+export function createApp(overrides = {}) {
+  const settings = Object.freeze({ ...config, ...overrides });
+  if (settings.env === "production" && !settings.apiBearerToken) {
+    throw new Error("API_BEARER_TOKEN is required in production.");
+  }
+  const imageProcessor = overrides.imageProcessor || processImage;
+  const bearerGuard = createBearerGuard(settings.apiBearerToken);
+  const admitCostlyRequest = createAdmissionMiddleware(settings);
+  const runtimeUpload = createUpload(settings);
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
@@ -53,7 +139,7 @@ export function createApp() {
   }));
   app.use(cors({
     origin(origin, callback) {
-      if (originAllowed(origin)) callback(null, true);
+      if (originAllowed(origin, settings.allowedOrigins)) callback(null, true);
       else callback(new AppError("ORIGIN_NOT_ALLOWED", "请求来源未获授权。", 403));
     },
     methods: ["GET", "POST", "OPTIONS"],
@@ -79,9 +165,22 @@ export function createApp() {
       ok: true,
       service: "edc-box-image-api",
       version: "2.0.0",
-      region: config.region,
+      region: settings.region,
       sharp: sharp.versions.sharp,
-      libvips: sharp.versions.vips
+      libvips: sharp.versions.vips,
+      authConfigured: Boolean(settings.apiBearerToken),
+      limits: {
+        concurrentRequests: settings.maxConcurrentRequests,
+        maxFiles: settings.maxFiles,
+        maxFileBytes: settings.maxFileBytes,
+        maxTotalBytes: settings.maxTotalBytes,
+        maxInputPixels: settings.maxInputPixels
+      },
+      cmykProfile: {
+        name: cmykProfile.name,
+        sha256: cmykProfile.sha256,
+        bytes: cmykProfile.bytes
+      }
     });
   });
 
@@ -89,8 +188,9 @@ export function createApp() {
   // Every request is processed locally with Sharp/libvips.
   app.post(
     "/process-image",
-    requireBearer,
-    upload.single("image"),
+    bearerGuard,
+    admitCostlyRequest,
+    runtimeUpload.single("image"),
     async (req, res, next) => {
       try {
         if (!req.file) {
@@ -108,7 +208,7 @@ export function createApp() {
           compressMode: "quality",
           quality
         });
-        const processed = await processImage(req.file.buffer, exportConfig);
+        const processed = await imageProcessor(req.file.buffer, exportConfig);
         res.setHeader("Content-Type", exportConfig.format === "PNG" ? "image/png" : "image/jpeg");
         res.setHeader("X-EDC-Legacy", "true");
         res.setHeader(
@@ -124,20 +224,28 @@ export function createApp() {
 
   app.post(
     "/v1/images/batch",
-    requireBearer,
-    upload.array("images", config.maxFiles),
+    bearerGuard,
+    admitCostlyRequest,
+    runtimeUpload.array("images", settings.maxFiles),
     async (req, res, next) => {
       try {
         if (!req.files || req.files.length === 0) {
           throw new AppError("NO_IMAGES", "请至少上传一张图片。");
         }
         const totalBytes = req.files.reduce((sum, file) => sum + file.size, 0);
-        if (totalBytes > config.maxTotalBytes) {
+        if (totalBytes > settings.maxTotalBytes) {
           throw new AppError("BATCH_TOO_LARGE", "本批次总大小超过限制。", 413);
         }
         for (const file of req.files) assertSupportedInput(file);
 
         const exportConfig = parseExportConfig(req.body.config);
+        if (exportConfig.format === "AVIF" && req.files.length > 2) {
+          throw new AppError(
+            "AVIF_BATCH_TOO_LARGE",
+            "AVIF batches are limited to two files per request.",
+            413
+          );
+        }
         const extension = exportConfig.format === "JPG"
           ? "jpg"
           : exportConfig.format.toLowerCase();
@@ -145,12 +253,12 @@ export function createApp() {
         const limit = pLimit(
           exportConfig.format === "AVIF"
             ? 1
-            : config.processConcurrency
+            : settings.processConcurrency
         );
 
         const results = await Promise.all(
           req.files.map((file, index) => limit(async () => {
-            const processed = await processImage(file.buffer, exportConfig);
+            const processed = await imageProcessor(file.buffer, exportConfig);
             return {
               name: names[index],
               data: processed.data,
@@ -166,7 +274,9 @@ export function createApp() {
           outputBytes: results.reduce((sum, item) => sum + item.info.outputBytes, 0),
           durationMs: Math.max(...results.map((item) => item.info.durationMs)),
           colorSpace: exportConfig.colorSpace,
-          profileVerified: results.every((item) => item.info.profileAttached)
+          profileVerified: results.every((item) => item.info.profileVerified),
+          profileName: cmykProfile.name,
+          profileSha256: cmykProfile.sha256
         };
         res.setHeader("Content-Type", "application/zip");
         res.setHeader(
@@ -193,12 +303,13 @@ export function createApp() {
   });
 
   app.use((error, req, res, _next) => {
+    error = normalizeRequestError(error);
     const normalized =
       error && error.code === "LIMIT_FILE_SIZE"
         ? new AppError("FILE_TOO_LARGE", "单张图片超过大小限制。", 413)
         : error;
     const output = toPublicError(normalized);
-    if (output.status >= 500) {
+    if (output.status >= 500 && normalized?.code !== "SERVICE_OVERLOADED") {
       console.error(JSON.stringify({
         level: "error",
         requestId: req.id,
